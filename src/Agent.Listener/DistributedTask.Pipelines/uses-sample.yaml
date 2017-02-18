@@ -1,0 +1,19 @@
+﻿template:
+  name: template-sample.yaml
+  parameters:
+    projects: myProject.sln
+    matrix:
+      - buildConfiguration: release
+        dotnet: 1.1
+      - buildConfiguration: debug
+        dotnet: 1.1
+    additionalVariables:
+      myCustomVar1: my value 1
+      myCustomVar2: my value 2
+  stepHooks:
+    before_install:
+      - task: cmdline@1.*
+        name: clean
+        inputs:
+          command: git
+          arguments: "clean -ffdx"
