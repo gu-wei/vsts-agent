@@ -161,13 +161,13 @@ namespace Microsoft.VisualStudio.Services.Agent
             {
                 if ((line ?? string.Empty).StartsWith("##[section]"))
                 {
-                    _term.WriteLine("******************************************************************************");
-                    _term.WriteLine(line.Substring("##[section]".Length));
-                    _term.WriteLine("******************************************************************************");
+                    Console.WriteLine("******************************************************************************");
+                    Console.WriteLine(line.Substring("##[section]".Length));
+                    Console.WriteLine("******************************************************************************");
                 }
                 else
                 {
-                    _term.WriteLine(line);
+                    Console.WriteLine(line);
                 }
 
                 return;

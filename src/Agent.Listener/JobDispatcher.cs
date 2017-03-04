@@ -359,8 +359,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                             }
                             else if (HostContext.RunMode == RunMode.Local)
                             {
-                                processInvoker.OutputDataReceived += (object sender, ProcessDataReceivedEventArgs e) => term.WriteLine(e.Data);
-                                processInvoker.ErrorDataReceived += (object sender, ProcessDataReceivedEventArgs e) => term.WriteLine(e.Data);
+                                processInvoker.OutputDataReceived += (object sender, ProcessDataReceivedEventArgs e) => Console.WriteLine(e.Data);
+                                processInvoker.ErrorDataReceived += (object sender, ProcessDataReceivedEventArgs e) => Console.WriteLine(e.Data);
                             }
 
                             // Start the child process.

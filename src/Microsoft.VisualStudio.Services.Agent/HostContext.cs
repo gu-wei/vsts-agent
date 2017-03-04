@@ -116,9 +116,7 @@ namespace Microsoft.VisualStudio.Services.Agent
         {
             get
             {
-                RunMode result = _runMode;
-                _trace.Verbose($"Run mode: {result}");
-                return result;
+                return _runMode;
             }
 
             set
