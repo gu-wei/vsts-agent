@@ -153,6 +153,20 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
         [YamlMember(Alias = "target")]
         public IDictionary<String, String> Target { get; set; }
 
+        [YamlMember(Alias = "timeout")]
+        public String Timeout
+        {
+            get
+            {
+                return m_timeout.ToString();
+            }
+
+            set
+            {
+                m_timeout = TimeSpan.Parse(value);
+            }
+        }
+
         [YamlMember(Alias = "variables")]
         public IDictionary<String, String> Variables { get; set; }
 
@@ -166,6 +180,7 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
         // {
         //     return new List<PipelineJob>();
         // }
+        private TimeSpan m_timeout = TimeSpan.FromHours(1);
     }
 
     public sealed class PipelineTemplate

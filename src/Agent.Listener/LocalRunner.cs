@@ -74,12 +74,20 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
             try
             {
                 jobDispatcher = HostContext.CreateService<IJobDispatcher>();
-                //AgentJobRequestMessage message = GetJobMessage();
-                foreach (AgentJobRequestMessage message in await ConvertToJobMessagesAsync(pipeline, token))
+                foreach (JobInfo job in await ConvertToJobMessagesAsync(pipeline, token))
                 {
-                    message.Environment.Variables[Constants.Variables.Agent.RunMode] = RunMode.Local.ToString();
-                    jobDispatcher.Run(message);
-                    await jobDispatcher.WaitAsync(token);
+                    job.RequestMessage.Environment.Variables[Constants.Variables.Agent.RunMode] = RunMode.Local.ToString();
+                    jobDispatcher.Run(job.RequestMessage);
+                    Task jobDispatch = jobDispatcher.WaitAsync(token);
+                    if (!Task.WaitAll(new[] { jobDispatch }, job.Timeout))
+                    {
+                        jobDispatcher.Cancel(job.CancelMessage);
+
+                        // Finish waiting on the same job dispatch task. The first call to WaitAsync dequeues
+                        // the dispatch task and then proceeds to wait on it. So we need to continue awaiting
+                        // the task instance (queue is now empty).
+                        await jobDispatch;
+                    }
                 }
             }
             finally
@@ -93,9 +101,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
             return Constants.Agent.ReturnCode.Success;
         }
 
-        private async Task<List<AgentJobRequestMessage>> ConvertToJobMessagesAsync(DTPipelines.Pipeline pipeline, CancellationToken token)
+        private async Task<List<JobInfo>> ConvertToJobMessagesAsync(DTPipelines.Pipeline pipeline, CancellationToken token)
         {
-            var jobs = new List<AgentJobRequestMessage>();
+            var jobs = new List<JobInfo>();
             int requestId = 1;
             foreach (PipelineJob job in pipeline.Jobs ?? new List<PipelineJob>(0))
             {
@@ -273,7 +281,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                 string message = builder.ToString();
                 try
                 {
-                    jobs.Add(JsonUtility.FromString<AgentJobRequestMessage>(message));
+                    jobs.Add(new JobInfo(job, message));
                 }
                 catch
                 {
@@ -502,7 +510,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
             return new Version(definition.Version.Major, definition.Version.Minor, definition.Version.Patch);
         }
 
-        private static void Dump(String header, String value)
+        private static void Dump(string header, string value)
         {
             Console.WriteLine();
             Console.WriteLine(String.Empty.PadRight(80, '*'));
@@ -511,8 +519,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
             Console.WriteLine();
             using (StringReader reader = new StringReader(value))
             {
-                Int32 lineNumber = 1;
-                String line = reader.ReadLine();
+                int lineNumber = 1;
+                string line = reader.ReadLine();
                 while (line != null)
                 {
                     Console.WriteLine($"{lineNumber.ToString().PadLeft(4)}: {line}");
@@ -520,6 +528,21 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                     lineNumber++;
                 }
             }
+        }
+
+        private sealed class JobInfo
+        {
+            public JobInfo(PipelineJob job, string requestMessage)
+            {
+                RequestMessage = JsonUtility.FromString<AgentJobRequestMessage>(requestMessage);
+                Timeout = TimeSpan.Parse(job.Timeout);
+            }
+
+            public JobCancelMessage CancelMessage => new JobCancelMessage(RequestMessage.JobId, TimeSpan.FromSeconds(60));
+
+            public AgentJobRequestMessage RequestMessage { get; }
+
+            public TimeSpan Timeout { get; }
         }
     }
 }
