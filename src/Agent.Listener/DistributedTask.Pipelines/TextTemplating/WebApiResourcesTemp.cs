@@ -1,3 +1,11 @@
+// This source file is maintained in two repos. Edits must be made to both copies.
+// Unit tests live in the vsts-agent repo on GitHub.
+//
+// Repo 1) VSO repo under DistributedTask/Sdk/Server/Expressions
+// Repo 2) vsts-agent repo on GitHub under src/Agent.Listener/DistributedTask.Pipelines
+//
+// The style of this source file aims to follow VSO/DistributedTask conventions.
+
 namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipelines.TextTemplating
 {
     public static class WebApiResourcesTemp
