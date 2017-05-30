@@ -13,8 +13,8 @@ A "YAML definifion" can be created by saving the definition with a variable `_ya
 * Sign-off [deserialization features](yamldeserialization.md).
 * Mustache context is ordinal-ignore-case
 * Tasks
- - Error if task collision on name
- - Enforce `N.*` version. In the future, support finer granularity and even version omission with checked-in tasks.
+  - Error if task collision on name
+  - Enforce `N.*` version. In the future, support finer granularity and even version omission with checked-in tasks.
 
 ## Checkpoint 2 - Public preview
 
@@ -23,19 +23,19 @@ Add UI to pick YAML file and disable/hide relevant portions of the web definitio
 ## Future checkpoint goals
 
 * Resources
- - Endpoints
- - Specify queue in YAML
- - Sync multiple repos
- - Import/export verbs
+  - Endpoints
+  - Specify queue in YAML
+  - Sync multiple repos
+  - Import/export verbs
 * Process
- - Checked-in tasks
- - Template in separate repo (and policy)
- - Continue-on-error at job-level
- - Simplified syntax for command/script tasks
- - Use namespaced name for extensions tasks (clean way out of collision problem?)
+  - Checked-in tasks
+  - Template in separate repo (and policy)
+  - Continue-on-error at job-level
+  - Simplified syntax for command/script tasks
+  - Use namespaced name for extensions tasks (clean way out of collision problem?)
 * Server
- - Cache YAML files
- - Fallback to job/cancel timeout specified in web definition
+  - Cache YAML files
+  - Fallback to job/cancel timeout specified in web definition
 * Definitions
- - Auto-create
- - Export to YAML
+  - Auto-create
+  - Export to YAML
