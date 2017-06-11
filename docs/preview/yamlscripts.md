@@ -12,6 +12,7 @@ The goal of this document is to define a simplified syntax for running scripts a
 
 ```yaml
 - command: full command line or inline script goes here
+  workingDirectory: $(system.defaultWorkingDirectory)
   ignoreExitCode: false
   failOnStderr: false
   script: false
@@ -21,6 +22,8 @@ The goal of this document is to define a simplified syntax for running scripts a
 ```
 
 `command` runs command lines using cmd.exe on Windows, and bash on Linux.
+
+`workingDirectory` defaults to `$(system.defaultWorkingDirectory)`.
 
 `ignoreExitCode` defaults to `false`.
 
@@ -51,6 +54,22 @@ Example 1:
 Example 2:
 <br />In an interactive shell, `echo hello %nosuch% var` outputs `hello %nosuch% var`.
 <br />In a script, `echo hello %nosuch% var` outputs `hello  var`.
+
+### Different name instead of "command"?
+
+The purpose of `command` is to run a command line (or inline script) using the native shell. Using the
+native shell (cmd.exe on Windows, bash on Linux) to run the command has two advantages over creating
+a process directly:
+1. Exposes shell built-ins.
+2. Allows inline script (multiline).
+
+Other possible names to consider instead of "command":
+- `exec` - the drawback of "exec" is that it gives the connotation (because of native exec functions in Linux)
+  that a process will be created directly rather than executed using the shell.
+- `shell` - the drawback of "shell" is that it precludes us from adding a property `runInShell: true/false` in the
+  future. See notes below for details about a potential usefulness of a property `runInShell`.
+
+An advantage of using the name "command" is that it lines up with the existing "Command Line" task.
 
 ### cmd.exe command line options
 
@@ -110,11 +129,14 @@ TODO
 
 ```yaml
 - bash: inline script
+  workingDirectory: $(system.defaultWorkingDirectory)
   ignoreExitCode: false
   failOnStderr: false
 ```
 
 `bash` runs inline script using bash from the PATH
+
+`workingDirectory` defaults to `$(system.defaultWorkingDirectory)`.
 
 `ignoreExitCode` defaults to `false`.
 
@@ -128,16 +150,21 @@ Specify noprofile, etc...
 
 Works on Windows too if bash is in the PATH. Check other well-known locations for sh.exe?
 
+Does +x need to be set? Will this "just work" for scripts in the repo?
+
 ## `powershell`
 
 ```yaml
 - ps: inline script
+  workingDirectory: $(system.defaultWorkingDirectory)
   errorActionPreference: stop
   ignoreExitCode: false
   failOnStderr: false
 ```
 
 `powershell` runs inline script using powershell from the PATH or well-known location.
+
+`workingDirectory` defaults to `$(system.defaultWorkingDirectory)`.
 
 `errorActionPreference` defaults to `stop`.
 
@@ -163,3 +190,89 @@ Works on Windows too if bash is in the PATH. Check other well-known locations fo
   <br />A) Different from powershell behavior.
   <br />B) Exit or return or break or continue are
   strange... can prevent checking $LASTEXITCODE... investigate.
+
+## Limitations of combining tool+args into a single input
+
+The proposed well-known tasks above take the full command line as one input. The proposed pattern
+differs from existing tasks. Today the existing tasks all specify two inputs - i.e. an
+input for tool or script-path and a separate input for args. Furthermore, existing script tasks (Batch/Shell/PowerShell) use `filePath` inputs to specify the script-path. Multiple implications follow from
+the proposed pattern change; specific scenarios are discussed further below.
+
+For reference, see followng summary of relevant command/script task inputs today:
+- Command Line
+  - (string) Tool
+  - (string) Args
+- Batch Script
+  - (filePath) Script
+  - (string) Args
+- Shell Script
+  - (filePath) Script
+  - (string) Args
+- PowerShell Script
+  - (filePath) Script
+  - (string) Args
+
+### Limitations for `command`
+
+For the proposed well-known task "command", combining tool+args into a single input doesn't impose
+much limitation.
+
+Note, the "Command Line" task today uses string for the Tool input. Since a goal of the task is to
+enable running shell built-in commands, filePath cannot be used.
+
+The only limitation imposed by combining tool+args into a single input, is the definition author
+will be responsible for accurately quoting the "tool" portion of the command line.
+
+### Limitations for `bash`/`powershell` using primary Git repo
+
+This analysis applies to the proposed well-known tasks `bash`/`powershell` under two scenarios:
+1. Today, when the build is using a Git repo, and the script is in the repo.
+2. In the future when sync'ing multiple repos is supported, the script is in the "primary repo",
+   and the primary repo is a Git repo.
+
+The existing script tasks use a filePath input type. So a relative path to a script in a Git repo today,
+is rooted against the repo directory. For example, `foo.sh` is rooted as `$(system.defaultWorkingDirectory)/foo.sh`.
+
+By combining script+args into a single input, some limitations are imposed:
+1. With a single combined script+args input, the shell will resolve relative script paths against the
+   working directory. The working directory will be defaulted to `system.defaultWorkingDirectory` so
+   relative paths will often work the same.
+   <br />
+   <br />
+   However, bash and powershell require at least one slash in unrooted script paths. This is a security measure
+   to prevent a file in the current directory from hijacking a command in the PATH. So
+   `foo.sh` will not work, but `./foo.sh` and `subdir/foo.sh` will. (TODO: CONFIRM subdir/foo.sh WORKS IN BASH)  
+
+2. Relative script paths now tied to working directory input. (Limitation in some scenarios, advantage in others).
+
+3. The definition author will be responsible for accurately quoting the "script" portion of the command line.
+
+### Limitations for `bash`/`powershell` using secondary Git repo
+
+In anticipation of multiple repos, we have discussed the idea of bringing additional functionality
+to filePath inputs. One idea is to introduce an elegant syntax `path/to/file@repo` to resolve a path
+against a secondary repo.
+
+By combining script+args into a single input, we lose the ability to leverage the future elegant
+syntax. The future elegant syntax will only work with filePath inputs.
+
+Two options exist for specifying scripts in secondary Git repos:
+1. Root the script against the secondary repo directory. For example, `$(repos.myFancyRepo.directory)/foo.sh`
+2. Set the workingDirectory so the shell will resolve the script path. For example,
+```yaml
+- bash: ./foo.sh
+  workingDirectory: $(repos.myFancyRepo.directory)
+```
+
+### Limitations for `bash`/`powershell` using TFVC/SVN repo
+
+Server-path to local-path resolution is complicated for TFVC/SVN due to mappings. For TFVC, the agent
+calls `tf resolvePath` to map filePath inputs.
+
+By combining script+args into a single input, we lose the ability to leverage functionality
+of filePath inputs to deal with the problem.
+
+However, we can solve the problem by adding support for inline expressions. For example, something like:
+```yaml
+- bash: $(=resolvePath('myFancyRepo', '$/teamProject/subdir/foo.sh'))
+```
