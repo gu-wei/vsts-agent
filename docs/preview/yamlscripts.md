@@ -4,24 +4,23 @@ The goal of this document is to define a simplified syntax for running scripts a
 
 ## Proposed well-known tasks
 
-- `command`
+- `script`
 - `bash`
 - `powershell`
 
-## `command`
+## `script`
 
 ```yaml
-- command: full command line or inline script goes here
+- script: inline script goes here
   workingDirectory: $(system.defaultWorkingDirectory)
   ignoreExitCode: false
   failOnStderr: false
-  script: false
   env:
     name1: value1
     name2: value2
 ```
 
-`command` runs command lines using cmd.exe on Windows, and bash on Linux.
+`script` inline script content. Uses cmd.exe on Windows, and sh on Linux.
 
 `workingDirectory` defaults to `$(system.defaultWorkingDirectory)`.
 
@@ -29,23 +28,24 @@ The goal of this document is to define a simplified syntax for running scripts a
 
 `failOnStderr` defaults to `false`.
 
-`script` affects Windows only. Defaults to `false`. Must be set to `true` to enable multiple lines
-on Windows. When `true`, the command is embedded in a .cmd file and subject to different interpreter
-rules. Otherwise cmd.exe is used to execute the command directly. For more details, see FWLINK.
-
 ### Works on all OS
 
-It is crucial that we have a well-known task (i.e. `command`) that works on both Windows and Linux.
+It is crucial that we have a well-known task (i.e. `script`) that works on both Windows and Linux.
 Many popular CI tools work on Windows and Linux. For example: git, node, npm, tfx.
 
-### Generate a temp script, or not?
+### Generate a temp script
 
-On Linux we will always generate a temp script to run the command.
+We will always generate a temp script with the inline content - shell script on Linux and a .cmd
+file on Windows.
 
-On Windows we cannot blindly generate a temp script to run the command. The problem is `%` is interpreted
-differently on the command line versus within a script. The script interpreter will interfere with URLs
-that contain encoded characters. In an interactive shell non-existing variables are not replaced. In a
-script non-existing variables are replaced with empty.
+On Windows, it is important to be aware that cmd.exe has two interpretation modes. Slightly different
+rules are applied by the command line interpreter versus the script interpreter.
+
+On a cmd.exe command line, `%` cannot be escaped. Whereas within a script it can be escaped by doubling
+the character - e.g. `echo this %%is%% escaped`
+
+Furthermore, on the command line non-existing variables are not replaced. Whereas in a script non-existing
+variables are replaced with empty.
 
 Example 1:
 <br />In an interactive shell, `echo hello%20world` outputs `hello%20world`.
@@ -55,25 +55,31 @@ Example 2:
 <br />In an interactive shell, `echo hello %nosuch% var` outputs `hello %nosuch% var`.
 <br />In a script, `echo hello %nosuch% var` outputs `hello  var`.
 
-### Different name instead of "command"?
+A way customers might run into problems with the script interpreter, would be if they leverage VSTS
+macros to inline a job variable into their script. The customer would not be able to escape the value,
+since they are referencing the value indirectly rather than hardcoding the value. Likely places where
+a customer would have a `%` in a variable, would be either in a password (secret variable) or a URL-encoded
+data. Note, password should be mapped in via env anyway. And only a subset of URLs contain URL-encoded
+data. So this limitation is probably OK.
 
-The purpose of `command` is to run a command line (or inline script) using the native shell. Using the
-native shell (cmd.exe on Windows, bash on Linux) to run the command has two advantages over creating
-a process directly:
-1. Exposes shell built-ins.
-2. Allows inline script (multiline).
+The ability to specify an `env` mapping becomes crucial for Windows in order to workaround escaping
+problems.
 
-Other possible names to consider instead of "command":
-- `exec` - the drawback of "exec" is that it gives the connotation (because of native exec functions in Linux)
-  that a process will be created directly rather than executed using the shell.
-- `shell` - the drawback of "shell" is that it precludes us from adding a property `runInShell: true/false` in the
-  future. See notes below for details about a potential usefulness of a property `runInShell`.
+Furthermore, one additional limitation follows. Since the syntax for referencing environment variables
+is different across Windows and Linux, script re-usability across platforms becomes somewhat more narrow.
+In practice this may not present a significant problem. - although likely not significant.
 
-An advantage of using the name "command" is that it lines up with the existing "Command Line" task.
+Lastly, one additional concern remains. Since the command-line-interpreter versus script-interpreter
+difference is subtle, we may run into customer confusion - "works on the command line". An alternative
+approach would be to name the well-known task by the more generic name `command` and offer users additional
+control whether to generate a script, or possibly even whether to exec the process directly instead of via
+the shell. The alternative has drawbacks of it's own (more complicated controls, different on Windows).
+Therefore, we think simply always generating a script is the better approach - and the name will be `script`
+so it should be clear the task is generating a script.
 
 ### cmd.exe command line options
 
-Wrap command with `"<FULL_PATH_TO_CMD.EXE>" /Q /D /E:ON /V:OFF /S /C "<COMMAND>"`
+Wrap command with `"<FULL_PATH_TO_CMD.EXE>" /Q /D /E:ON /V:OFF /S /C "<TODO>"`
 - `/Q` Turns echo off.
   - Not sure whether we should set /Q.
     <br />
@@ -124,6 +130,8 @@ TODO
   is similar to `verbatim` functionality in task lib. Furthermore, would that mean Linux users should be able to specify argv rather
   than forced to specify the full line?
 - Do we need a way to influence how the agent interprets stdout encoding?
+- Will "script" commonly mislead customers to think they can specify a powershell script file path followed by
+  args? Alternative would be something like "command" verbiage.
 
 ## `bash`
 
