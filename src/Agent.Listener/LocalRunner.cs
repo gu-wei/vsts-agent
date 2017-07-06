@@ -58,7 +58,19 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
             // Load the YAML file.
             string yamlFile = command.GetYaml();
             ArgUtil.File(yamlFile, nameof(yamlFile));
-            Pipelines.Process process = await PipelineParser.LoadAsync(yamlFile);
+            var parseOptions = new ParseOptions
+            {
+                MaxFiles = 10,
+                MustacheEvaluationMaxResultLength = 512 * 1024, // 512k string length
+                MustacheEvaluationTimeout = TimeSpan.FromSeconds(10),
+                MustacheMaxDepth = 5,
+            };
+            var pipelineParser = new PipelineParser(new PipelineTraceWriter(), new PipelineFileProvider(), parseOptions);
+            Pipelines.Process process = pipelineParser.Load(
+                defaultRoot: Directory.GetCurrentDirectory(),
+                path: yamlFile,
+                mustacheContext: null,
+                cancellationToken: HostContext.AgentShutdownToken);
             ArgUtil.NotNull(process, nameof(process));
             if (command.WhatIf)
             {
@@ -549,7 +561,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
             public JobInfo(Job job, string requestMessage)
             {
                 RequestMessage = JsonUtility.FromString<AgentJobRequestMessage>(requestMessage);
-                Timeout = job.Timeout ?? TimeSpan.FromHours(1);
+                Timeout = TimeSpan.FromMinutes(job.TimeoutInMinutes ?? 60);
             }
 
             public JobCancelMessage CancelMessage => new JobCancelMessage(RequestMessage.JobId, TimeSpan.FromSeconds(60));
@@ -557,6 +569,37 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
             public AgentJobRequestMessage RequestMessage { get; }
 
             public TimeSpan Timeout { get; }
+        }
+
+        private sealed class PipelineTraceWriter : Pipelines.ITraceWriter
+        {
+            public void Info(String format, params Object[] args)
+            {
+                Console.WriteLine(format, args);
+            }
+
+            public void Verbose(String format, params Object[] args)
+            {
+                Console.WriteLine(format, args);
+            }
+        }
+
+        private sealed class PipelineFileProvider : Pipelines.IFileProvider
+        {
+            public FileData GetFile(String path)
+            {
+                return new FileData
+                {
+                    Name = Path.GetFileName(path),
+                    Directory = Path.GetDirectoryName(path),
+                    Content = File.ReadAllText(path),
+                };
+            }
+
+            public String ResolvePath(String defaultRoot, String path)
+            {
+                return Path.Combine(defaultRoot, path);
+            }
         }
     }
 }

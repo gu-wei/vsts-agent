@@ -109,7 +109,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                     HostContext.RunMode = RunMode.Local;
                     command.SetUnattended();
                     var localRunner = HostContext.GetService<ILocalRunner>();
-                    return await localRunner.RunAsync(command, TokenSource.Token);
+                    return await localRunner.RunAsync(command, HostContext.AgentShutdownToken);
                 }
 
                 AgentSettings settings = configManager.LoadSettings();

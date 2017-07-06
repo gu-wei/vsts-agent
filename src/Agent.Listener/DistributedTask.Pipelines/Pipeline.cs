@@ -1,14 +1,13 @@
 ﻿// This source file is maintained in two repos. Edits must be made to both copies.
 // Unit tests live in the vsts-agent repo on GitHub.
 //
-// Repo 1) VSO repo under DistributedTask/Sdk/Server/Expressions
+// Repo 1) VSO repo under DistributedTask/Sdk/Server/Pipelines
 // Repo 2) vsts-agent repo on GitHub under src/Agent.Listener/DistributedTask.Pipelines
 //
 // The style of this source file aims to follow VSO/DistributedTask conventions.
 
 using System;
 using System.Collections.Generic;
-using YamlDotNet.Serialization;
 
 namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipelines
 {
@@ -55,6 +54,8 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
 
     public class Phase : Job, IPhase
     {
+        public Boolean? Parallel { get; set; }
+
         public PhaseTarget Target { get; set; }
 
         public List<IJob> Jobs { get; set; }
@@ -96,7 +97,7 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
     {
         public String Name { get; set; }
 
-        public TimeSpan? Timeout { get; set; }
+        public Int32? TimeoutInMinutes { get; set; }
 
         public List<IVariable> Variables { get; set; }
 
@@ -200,6 +201,8 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
 
         public Boolean Enabled { get; set; }
 
+        public IDictionary<String, String> Environment { get; set; }
+
         public IDictionary<String, String> Inputs { get; set; }
 
         public TaskReference Reference { get; set; }
@@ -214,6 +217,7 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
                 Condition = Condition,
                 ContinueOnError = ContinueOnError,
                 Enabled = Enabled,
+                Environment = new Dictionary<String, String>(Environment ?? new Dictionary<String, String>(0)),
                 Inputs = new Dictionary<String, String>(Inputs ?? new Dictionary<String, String>(0)),
                 Reference = Reference?.Clone(),
                 TimeoutInMinutes = TimeoutInMinutes,

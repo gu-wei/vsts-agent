@@ -1,7 +1,7 @@
 ﻿// This source file is maintained in two repos. Edits must be made to both copies.
 // Unit tests live in the vsts-agent repo on GitHub.
 //
-// Repo 1) VSO repo under DistributedTask/Sdk/Server/Expressions
+// Repo 1) VSO repo under DistributedTask/Sdk/Server/Pipelines
 // Repo 2) vsts-agent repo on GitHub under src/Agent.Listener/DistributedTask.Pipelines
 //
 // The style of this source file aims to follow VSO/DistributedTask conventions.
@@ -12,20 +12,45 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
-using Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipelines.TextTemplating;
+using System.Threading;
+using Microsoft.VisualStudio.Services.WebApi;
 using YamlDotNet.Serialization;
 
 namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipelines
 {
-    public static class PipelineParser
+    public sealed class PipelineParser
     {
-        public static async Task<Process> LoadAsync(String filePath)
+        public PipelineParser(ITraceWriter trace, IFileProvider fileProvider, ParseOptions options)
         {
+            if (trace == null)
+            {
+                throw new ArgumentNullException(nameof(trace));
+            }
+
+            if (fileProvider == null)
+            {
+                throw new ArgumentNullException(nameof(fileProvider));
+            }
+
+            if (options == null)
+            {
+                throw new ArgumentNullException(nameof(options));
+            }
+
+            m_trace = trace;
+            m_fileProvider = fileProvider;
+            m_options = new ParseOptions(options);
+        }
+
+        public Process Load(String defaultRoot, String path, IDictionary<String, Object> mustacheContext, CancellationToken cancellationToken)
+        {
+            Int32 fileCount = 0;
+
             // Load the target file.
-            filePath = Path.Combine(Directory.GetCurrentDirectory(), filePath);
-            Process process = await LoadFileAsync<Process, ProcessConverter>(filePath);
-            await ResolveTemplatesAsync(process, rootDirectory: Path.GetDirectoryName(filePath));
+            path = m_fileProvider.ResolvePath(defaultRoot: defaultRoot, path: path);
+            PipelineFile<Process> processFile = LoadFile<Process, ProcessConverter>(path, mustacheContext, cancellationToken, ref fileCount);
+            Process process = processFile.Object;
+            ResolveTemplates(process, defaultRoot: processFile.Directory, cancellationToken: cancellationToken, fileCount: ref fileCount);
 
             // Create implied levels for the process.
             if (process.Jobs != null)
@@ -45,86 +70,220 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
                 process.Steps = null;
             }
 
-            // Create implied levels for each phase.
-            foreach (Phase phase in process.Phases ?? new List<IPhase>(0))
-            {
-                if (phase.Steps != null)
-                {
-                    var newJob = new Job { Steps = phase.Steps };
-                    phase.Jobs = new List<IJob>(new IJob[] { newJob });
-                    phase.Steps = null;
-                }
-            }
-
-            // Record all known phase/job names.
             var knownPhaseNames = new HashSet<String>(StringComparer.OrdinalIgnoreCase);
             var knownJobNames = new HashSet<String>(StringComparer.OrdinalIgnoreCase);
-            foreach (Phase phase in process.Phases ?? new List<IPhase>(0))
+            if (process.Phases != null)
             {
-                knownPhaseNames.Add(phase.Name);
-                foreach (Job job in phase.Jobs ?? new List<IJob>(0))
+                foreach (Phase phase in process.Phases)
                 {
-                    knownJobNames.Add(job.Name);
+                    // Create implied levels for the phase.
+                    if (phase.Steps != null)
+                    {
+                        var newJob = new Job { Steps = phase.Steps };
+                        phase.Jobs = new List<IJob>(new IJob[] { newJob });
+                        phase.Steps = null;
+                    }
+
+                    // Record all known phase/job names.
+                    knownPhaseNames.Add(phase.Name);
+                    if (phase.Jobs != null)
+                    {
+                        foreach (Job job in phase.Jobs)
+                        {
+                            knownJobNames.Add(job.Name);
+                        }
+                    }
                 }
             }
 
             // Generate missing names.
             Int32? nextPhase = null;
             Int32? nextJob = null;
-            foreach (Phase phase in process.Phases ?? new List<IPhase>(0))
+            if (process.Phases != null)
             {
-                if (String.IsNullOrEmpty(phase.Name))
+                foreach (Phase phase in process.Phases)
                 {
-                    String candidateName = String.Format(CultureInfo.InvariantCulture, "Phase{0}", nextPhase);
-                    while (!knownPhaseNames.Add(candidateName))
+                    if (String.IsNullOrEmpty(phase.Name))
                     {
-                        nextPhase = (nextPhase ?? 1) + 1;
-                        candidateName = String.Format(CultureInfo.InvariantCulture, "Phase{0}", nextPhase);
-                    }
-
-                    phase.Name = candidateName;
-                }
-
-                foreach (Job job in phase.Jobs ?? new List<IJob>(0))
-                {
-                    if (String.IsNullOrEmpty(job.Name))
-                    {
-                        String candidateName = String.Format(CultureInfo.InvariantCulture, "Build{0}", nextJob);
+                        String candidateName = String.Format(CultureInfo.InvariantCulture, "Phase{0}", nextPhase);
                         while (!knownPhaseNames.Add(candidateName))
                         {
-                            nextJob = (nextJob ?? 1) + 1;
-                            candidateName = String.Format(CultureInfo.InvariantCulture, "Build{0}", nextJob);
+                            nextPhase = (nextPhase ?? 1) + 1;
+                            candidateName = String.Format(CultureInfo.InvariantCulture, "Phase{0}", nextPhase);
                         }
 
-                        job.Name = candidateName;
+                        phase.Name = candidateName;
+                    }
+
+                    if (phase.Jobs != null)
+                    {
+                        foreach (Job job in phase.Jobs)
+                        {
+                            if (String.IsNullOrEmpty(job.Name))
+                            {
+                                String candidateName = String.Format(CultureInfo.InvariantCulture, "Build{0}", nextJob);
+                                while (!knownPhaseNames.Add(candidateName))
+                                {
+                                    nextJob = (nextJob ?? 1) + 1;
+                                    candidateName = String.Format(CultureInfo.InvariantCulture, "Build{0}", nextJob);
+                                }
+
+                                job.Name = candidateName;
+                            }
+                        }
                     }
                 }
             }
 
-            Dump<Process, ProcessConverter>("After resolution", process);
+            m_trace.Verbose("{0}", new TraceObject<Process, ProcessConverter>("After resolution", process));
             return process;
         }
 
-        private static async Task ResolveTemplatesAsync(Process process, String rootDirectory)
+        private PipelineFile<TObject> LoadFile<TObject, TConverter>(String path, IDictionary<String, Object> mustacheContext, CancellationToken cancellationToken, ref Int32 fileCount)
+            where TConverter : YamlTypeConverter, new()
+        {
+            fileCount++;
+            if (m_options.MaxFiles > 0 && fileCount > m_options.MaxFiles)
+            {
+                throw new FormatException(TaskResources.YamlFileCount(m_options.MaxFiles));
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            FileData file = m_fileProvider.GetFile(path);
+            String mustacheReplaced;
+            StringReader reader = null;
+            CancellationTokenSource mustacheCancellationTokenSource = null;
+            try
+            {
+                // Read front-matter
+                IDictionary<String, Object> frontMatter = null;
+                reader = new StringReader(file.Content);
+                String line = reader.ReadLine();
+                if (!String.Equals(line, "---", StringComparison.Ordinal))
+                {
+                    // No front-matter. Reset the reader.
+                    reader.Dispose();
+                    reader = new StringReader(file.Content);
+                }
+                else
+                {
+                    // Deseralize front-matter.
+                    cancellationToken.ThrowIfCancellationRequested();
+                    StringBuilder frontMatterBuilder = new StringBuilder();
+                    while (true)
+                    {
+                        line = reader.ReadLine();
+                        if (line == null)
+                        {
+                            throw new FormatException(TaskResources.YamlFrontMatterNotClosed(path));
+                        }
+                        else if (String.Equals(line, "---", StringComparison.Ordinal))
+                        {
+                            break;
+                        }
+                        else
+                        {
+                            frontMatterBuilder.AppendLine(line);
+                        }
+                    }
+
+                    var frontMatterDeserializer = new Deserializer();
+                    try
+                    {
+                        frontMatter = frontMatterDeserializer.Deserialize<IDictionary<String, Object>>(frontMatterBuilder.ToString());
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new FormatException(TaskResources.YamlFrontMatterNotValid(path, ex.Message), ex);
+                    }
+                }
+
+                // Merge the mustache replace context.
+                frontMatter = frontMatter ?? new Dictionary<String, Object>();
+                if (mustacheContext != null)
+                {
+                    foreach (KeyValuePair<String, Object> pair in mustacheContext)
+                    {
+                        frontMatter[pair.Key] = pair.Value;
+                    }
+                }
+
+                // Prepare the mustache options.
+                mustacheCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var mustacheOptions = new MustacheEvaluationOptions
+                {
+                    CancellationToken = mustacheCancellationTokenSource.Token,
+                    EncodeMethod = MustacheEncodeMethods.JsonEncode,
+                    MaxResultLength = m_options.MustacheEvaluationMaxResultLength,
+                };
+
+                // Parse the mustache template.
+                cancellationToken.ThrowIfCancellationRequested();
+                var mustacheParser = new MustacheTemplateParser(useDefaultHandlebarHelpers: true, useCommonTemplateHelpers: true);
+                MustacheExpression mustacheExpression = mustacheParser.Parse(template: reader.ReadToEnd());
+
+                // Limit the mustache evaluation time.
+                if (m_options.MustacheEvaluationTimeout > TimeSpan.Zero)
+                {
+                    mustacheCancellationTokenSource.CancelAfter(m_options.MustacheEvaluationTimeout);
+                }
+
+                try
+                {
+                    // Perform the mustache evaluation.
+                    mustacheReplaced = mustacheExpression.Evaluate(
+                        replacementObject: frontMatter,
+                        additionalEvaluationData: null,
+                        parentContext: null,
+                        partialExpressions: null,
+                        options: mustacheOptions);
+                }
+                catch (System.OperationCanceledException ex) when (mustacheCancellationTokenSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    throw new System.OperationCanceledException(TaskResources.MustacheEvaluationTimeout(path, m_options.MustacheEvaluationTimeout.TotalSeconds), ex);
+                }
+
+                m_trace.Verbose("{0}", new TraceFileContent($"{file.Name} after mustache replacement", mustacheReplaced));
+            }
+            finally
+            {
+                reader?.Dispose();
+                reader = null;
+                mustacheCancellationTokenSource?.Dispose();
+                mustacheCancellationTokenSource = null;
+            }
+
+            // Deserialize
+            DeserializerBuilder deserializerBuilder = new DeserializerBuilder();
+            deserializerBuilder.WithTypeConverter(new TConverter());
+            Deserializer deserializer = deserializerBuilder.Build();
+            TObject obj = deserializer.Deserialize<TObject>(mustacheReplaced);
+            m_trace.Verbose("{0}", new TraceObject<TObject, TConverter>($"{file.Name} after deserialization ", obj));
+            var result = new PipelineFile<TObject> { Name = file.Name, Directory = file.Directory, Object = obj };
+            return result;
+        }
+
+        private void ResolveTemplates(Process process, String defaultRoot, CancellationToken cancellationToken, ref Int32 fileCount)
         {
             if (process.Template != null)
             {
                 // Load the template.
-                String templateFilePath = Path.Combine(rootDirectory, process.Template.Name);
-                ProcessTemplate template = await LoadFileAsync<ProcessTemplate, ProcessTemplateConverter>(templateFilePath, process.Template.Parameters);
+                String templateFilePath = m_fileProvider.ResolvePath(defaultRoot: defaultRoot, path: process.Template.Name);
+                PipelineFile<ProcessTemplate> templateFile = LoadFile<ProcessTemplate, ProcessTemplateConverter>(templateFilePath, process.Template.Parameters, cancellationToken, ref fileCount);
+                ProcessTemplate template = templateFile.Object;
 
                 // Resolve template references within the template.
                 if (template.Phases != null)
                 {
-                    await ResolveTemplatesAsync(template.Phases, rootDirectory: Path.GetDirectoryName(templateFilePath));
+                    ResolveTemplates(template.Phases, defaultRoot: templateFile.Directory, cancellationToken: cancellationToken, fileCount: ref fileCount);
                 }
                 else if (template.Jobs != null)
                 {
-                    await ResolveTemplatesAsync(template.Jobs, rootDirectory: Path.GetDirectoryName(templateFilePath));
+                    ResolveTemplates(template.Jobs, defaultRoot: templateFile.Directory, cancellationToken: cancellationToken, fileCount: ref fileCount);
                 }
                 else if (template.Steps != null)
                 {
-                    await ResolveTemplatesAsync(template.Steps, rootDirectory: Path.GetDirectoryName(templateFilePath));
+                    ResolveTemplates(template.Steps, defaultRoot: templateFile.Directory, cancellationToken: cancellationToken, fileCount: ref fileCount);
                 }
 
                 // Merge the template.
@@ -138,42 +297,42 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
             // Resolve nested template references.
             else if (process.Phases != null)
             {
-                await ResolveTemplatesAsync(process.Phases, rootDirectory);
+                ResolveTemplates(process.Phases, defaultRoot, cancellationToken, ref fileCount);
             }
             else if (process.Jobs != null)
             {
-                await ResolveTemplatesAsync(process.Jobs, rootDirectory);
+                ResolveTemplates(process.Jobs, defaultRoot, cancellationToken, ref fileCount);
             }
             else if (process.Variables != null)
             {
-                await ResolveTemplatesAsync(process.Variables, rootDirectory);
+                ResolveTemplates(process.Variables, defaultRoot, cancellationToken, ref fileCount);
             }
             else if (process.Steps != null)
             {
-                await ResolveTemplatesAsync(process.Steps, rootDirectory);
+                ResolveTemplates(process.Steps, defaultRoot, cancellationToken, ref fileCount);
             }
         }
 
-        private static async Task ResolveTemplatesAsync(List<IPhase> phases, String rootDirectory)
+        private void ResolveTemplates(List<IPhase> phases, String defaultRoot, CancellationToken cancellationToken, ref Int32 fileCount)
         {
-            phases = phases ?? new List<IPhase>(0);
-            for (int i = 0 ; i < phases.Count ; )
+            for (int i = 0 ; i < (phases?.Count ?? 0) ; )
             {
                 if (phases[i] is PhasesTemplateReference)
                 {
                     // Load the template.
                     var reference = phases[i] as PhasesTemplateReference;
-                    String templateFilePath = Path.Combine(rootDirectory, reference.Name);
-                    PhasesTemplate template = await LoadFileAsync<PhasesTemplate, PhasesTemplateConverter>(templateFilePath, reference.Parameters);
+                    String templateFilePath = m_fileProvider.ResolvePath(defaultRoot: defaultRoot, path: reference.Name);
+                    PipelineFile<PhasesTemplate> templateFile = LoadFile<PhasesTemplate, PhasesTemplateConverter>(templateFilePath, reference.Parameters, cancellationToken, ref fileCount);
+                    PhasesTemplate template = templateFile.Object;
 
                     // Resolve template references within the template.
                     if (template.Jobs != null)
                     {
-                        await ResolveTemplatesAsync(template.Jobs, rootDirectory: Path.GetDirectoryName(templateFilePath));
+                        ResolveTemplates(template.Jobs, defaultRoot: templateFile.Directory, cancellationToken: cancellationToken, fileCount: ref fileCount);
                     }
                     else if (template.Steps != null)
                     {
-                        await ResolveTemplatesAsync(template.Steps, rootDirectory: Path.GetDirectoryName(templateFilePath));
+                        ResolveTemplates(template.Steps, defaultRoot: templateFile.Directory, cancellationToken: cancellationToken, fileCount: ref fileCount);
                     }
 
                     // Merge the template.
@@ -204,15 +363,15 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
                     var phase = phases[i] as Phase;
                     if (phase.Jobs != null)
                     {
-                        await ResolveTemplatesAsync(phase.Jobs, rootDirectory);
+                        ResolveTemplates(phase.Jobs, defaultRoot, cancellationToken, ref fileCount);
                     }
                     else if (phase.Variables != null)
                     {
-                        await ResolveTemplatesAsync(phase.Variables, rootDirectory);
+                        ResolveTemplates(phase.Variables, defaultRoot, cancellationToken, ref fileCount);
                     }
                     else if (phase.Steps != null)
                     {
-                        await ResolveTemplatesAsync(phase.Steps, rootDirectory);
+                        ResolveTemplates(phase.Steps, defaultRoot, cancellationToken, ref fileCount);
                     }
 
                     i++;
@@ -220,17 +379,17 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
             }
         }
 
-        private static async Task ResolveTemplatesAsync(List<IJob> jobs, String rootDirectory)
+        private void ResolveTemplates(List<IJob> jobs, String defaultRoot, CancellationToken cancellationToken, ref Int32 fileCount)
         {
-            jobs = jobs ?? new List<IJob>(0);
-            for (int i = 0 ; i < jobs.Count ; )
+            for (int i = 0 ; i < (jobs?.Count ?? 0) ; )
             {
                 if (jobs[i] is JobsTemplateReference)
                 {
                     // Load the template.
                     var reference = jobs[i] as JobsTemplateReference;
-                    String templateFilePath = Path.Combine(rootDirectory, reference.Name);
-                    JobsTemplate template = await LoadFileAsync<JobsTemplate, JobsTemplateConverter>(templateFilePath, reference.Parameters);
+                    String templateFilePath = m_fileProvider.ResolvePath(defaultRoot: defaultRoot, path: reference.Name);
+                    PipelineFile<JobsTemplate> templateFile = LoadFile<JobsTemplate, JobsTemplateConverter>(templateFilePath, reference.Parameters, cancellationToken, ref fileCount);
+                    JobsTemplate template = templateFile.Object;
 
                     // Resolve template references within the template.
                     if (template.Jobs != null)
@@ -239,13 +398,13 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
                         {
                             if (job.Variables != null)
                             {
-                                await ResolveTemplatesAsync(job.Variables, rootDirectory: Path.GetDirectoryName(templateFilePath));
+                                ResolveTemplates(job.Variables, defaultRoot: templateFile.Directory, cancellationToken: cancellationToken, fileCount: ref fileCount);
                             }
                         }
                     }
                     else if (template.Steps != null)
                     {
-                        await ResolveTemplatesAsync(template.Steps, rootDirectory: Path.GetDirectoryName(templateFilePath));
+                        ResolveTemplates(template.Steps, defaultRoot: templateFile.Directory, cancellationToken: cancellationToken, fileCount: ref fileCount);
                     }
 
                     // Merge the template.
@@ -269,12 +428,12 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
                     var job = jobs[i] as Job;
                     if (job.Variables != null)
                     {
-                        await ResolveTemplatesAsync(job.Variables, rootDirectory);
+                        ResolveTemplates(job.Variables, defaultRoot, cancellationToken, ref fileCount);
                     }
 
                     if (job.Steps != null)
                     {
-                        await ResolveTemplatesAsync(job.Steps, rootDirectory);
+                        ResolveTemplates(job.Steps, defaultRoot, cancellationToken, ref fileCount);
                     }
 
                     i++;
@@ -282,17 +441,17 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
             }
         }
 
-        private static async Task ResolveTemplatesAsync(List<IVariable> variables, String rootDirectory)
+        private void ResolveTemplates(List<IVariable> variables, String defaultRoot, CancellationToken cancellationToken, ref Int32 fileCount)
         {
-            variables = variables ?? new List<IVariable>(0);
-            for (int i = 0 ; i < variables.Count ; )
+            for (int i = 0 ; i < (variables?.Count ?? 0) ; )
             {
                 if (variables[i] is VariablesTemplateReference)
                 {
                     // Load the template.
                     var reference = variables[i] as VariablesTemplateReference;
-                    String templateFilePath = Path.Combine(rootDirectory, reference.Name);
-                    VariablesTemplate template = await LoadFileAsync<VariablesTemplate, VariablesTemplateConverter>(templateFilePath, reference.Parameters);
+                    String templateFilePath = m_fileProvider.ResolvePath(defaultRoot: defaultRoot, path: reference.Name);
+                    PipelineFile<VariablesTemplate> templateFile = LoadFile<VariablesTemplate, VariablesTemplateConverter>(templateFilePath, reference.Parameters, cancellationToken, ref fileCount);
+                    VariablesTemplate template = templateFile.Object;
 
                     // Merge the template.
                     variables.RemoveAt(i);
@@ -309,17 +468,17 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
             }
         }
 
-        private static async Task ResolveTemplatesAsync(List<IStep> steps, String rootDirectory)
+        private void ResolveTemplates(List<IStep> steps, String defaultRoot, CancellationToken cancellationToken, ref Int32 fileCount)
         {
-            steps = steps ?? new List<IStep>(0);
-            for (int i = 0 ; i < steps.Count ; )
+            for (int i = 0 ; i < (steps?.Count ?? 0); )
             {
                 if (steps[i] is StepsTemplateReference)
                 {
                     // Load the template.
                     var reference = steps[i] as StepsTemplateReference;
-                    String templateFilePath = Path.Combine(rootDirectory, reference.Name);
-                    StepsTemplate template = await LoadFileAsync<StepsTemplate, StepsTemplateConverter>(templateFilePath, reference.Parameters);
+                    String templateFilePath = m_fileProvider.ResolvePath(defaultRoot: defaultRoot, path: reference.Name);
+                    PipelineFile<StepsTemplate> templateFile = LoadFile<StepsTemplate, StepsTemplateConverter>(templateFilePath, reference.Parameters, cancellationToken, ref fileCount);
+                    StepsTemplate template = templateFile.Object;
 
                     // Merge the template.
                     ApplyStepOverrides(reference.StepOverrides, template.Steps);
@@ -341,19 +500,21 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
         {
             // Select by phase name.
             var byPhaseNames =
-                (from PhaseSelector phaseSelector in reference.PhaseSelectors ?? new List<PhaseSelector>(0)
-                join Phase phase in template.Phases ?? new List<IPhase>(0)
-                on phaseSelector.Name equals phase.Name
-                select new { Selector = phaseSelector, Phase = phase })
+                (reference.PhaseSelectors ?? new List<PhaseSelector>(0))
+                .Join(inner: (template.Phases ?? new List<IPhase>(0)).Cast<Phase>(),
+                    outerKeySelector: (PhaseSelector phaseSelector) => phaseSelector.Name,
+                    innerKeySelector: (Phase phase) => phase.Name,
+                    resultSelector: (PhaseSelector phaseSelector, Phase phase) => new { Selector = phaseSelector, Phase = phase })
                 .ToArray();
             foreach (var byPhaseName in byPhaseNames)
             {
                 // Select by phase name + job name.
                 var byPhaseNamesAndJobNames =
-                    (from JobSelector jobSelector in byPhaseName.Selector.JobSelectors ?? new List<JobSelector>(0)
-                    join Job job in byPhaseName.Phase.Jobs ?? new List<IJob>(0)
-                    on jobSelector.Name equals job.Name
-                    select new { Selector = jobSelector, Job = job })
+                    (byPhaseName.Selector.JobSelectors ?? new List<JobSelector>(0))
+                    .Join(inner: (byPhaseName.Phase.Jobs ?? new List<IJob>(0)).Cast<Job>(),
+                        outerKeySelector: (JobSelector jobSelector) => jobSelector.Name,
+                        innerKeySelector: (Job job) => job.Name,
+                        resultSelector: (JobSelector jobSelector, Job job) => new { Selector = jobSelector, Job = job })
                     .ToArray();
                 foreach (var byPhaseNameAndJobName in byPhaseNamesAndJobNames)
                 {
@@ -368,12 +529,14 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
                 .Cast<Phase>()
                 .SelectMany((Phase phase) => phase.Jobs ?? new List<IJob>(0))
                 .Concat(template.Jobs ?? new List<IJob>(0))
+                .Cast<Job>()
                 .ToArray();
             var byJobNames =
-                (from JobSelector jobSelector in reference.JobSelectors ?? new List<JobSelector>(0)
-                join Job job in allJobs
-                on jobSelector.Name equals job.Name
-                select new { Selector = jobSelector, Job = job })
+                (reference.JobSelectors ?? new List<JobSelector>(0))
+                .Join(inner: allJobs,
+                    outerKeySelector: (JobSelector jobSelector) => jobSelector.Name,
+                    innerKeySelector: (Job job) => job.Name,
+                    resultSelector: (JobSelector jobSelector, Job job) => new { Selector = jobSelector, Job = job })
                 .ToArray();
 
             // Apply overrides from job selectors.
@@ -394,9 +557,8 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
             // Apply unqualified overrides.
             var allStepLists =
                 allJobs
-                .Cast<Job>()
                 .Select((Job job) => job.Steps ?? new List<IStep>(0))
-                .Append(template.Steps ?? new List<IStep>(0))
+                .Concat(new[] { template.Steps ?? new List<IStep>(0) })
                 .ToArray();
             foreach (List<IStep> stepList in allStepLists)
             {
@@ -408,10 +570,11 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
         {
             // Select by job name.
             var byJobNames =
-                (from JobSelector jobSelector in reference.JobSelectors ?? new List<JobSelector>(0)
-                join Job job in template.Jobs ?? new List<IJob>(0)
-                on jobSelector.Name equals job.Name
-                select new { Selector = jobSelector, Job = job })
+                (reference.JobSelectors ?? new List<JobSelector>(0))
+                .Join(inner: (template.Jobs ?? new List<IJob>(0)).Cast<Job>(),
+                    outerKeySelector: (JobSelector jobSelector) => jobSelector.Name,
+                    innerKeySelector: (Job job) => job.Name,
+                    resultSelector: (JobSelector jobSelector, Job job) => new { Selector = jobSelector, Job = job })
                 .ToArray();
 
             // Apply overrides from job selectors.
@@ -425,7 +588,7 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
                 (template.Jobs ?? new List<IJob>(0))
                 .Cast<Job>()
                 .Select((Job job) => job.Steps ?? new List<IStep>(0))
-                .Append(template.Steps ?? new List<IStep>(0))
+                .Concat(new[] { template.Steps ?? new List<IStep>(0) })
                 .ToArray();
             foreach (List<IStep> stepList in allStepLists)
             {
@@ -472,118 +635,139 @@ namespace Microsoft.TeamFoundation.DistributedTask.Orchestration.Server.Pipeline
             return result;
         }
 
-        private static async Task<TResult> LoadFileAsync<TResult, TConverter>(String path, IDictionary<String, Object> mustacheContext = null)
-            where TConverter : YamlTypeConverter, new() 
+        private sealed class PipelineFile<T>
         {
-            String mustacheReplaced;
-            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
+            public String Name { get; set; }
+
+            public String Directory { get; set; }
+
+            public T Object { get; set; }
+        }
+
+        private struct TraceFileContent
+        {
+            public TraceFileContent(String header, String value)
             {
-                StreamReader reader = null;
-                try
-                {
-                    // Read front-matter
-                    IDictionary<String, Object> frontMatter = null;
-                    reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
-                    String line = await reader.ReadLineAsync();
-                    if (!String.Equals(line, "---", StringComparison.Ordinal))
-                    {
-                        // No front-matter. Reset the stream.
-                        reader.Dispose();
-                        stream.Seek(0, SeekOrigin.Begin);
-                        reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: false);
-                    }
-                    else
-                    {
-                        // Deseralize front-matter.
-                        StringBuilder frontMatterBuilder = new StringBuilder();
-                        while (true)
-                        {
-                            line = await reader.ReadLineAsync();
-                            if (line == null)
-                            {
-                                // TODO: better error message.
-                                throw new Exception("expected end of front-matter section");
-                            }
-                            else if (String.Equals(line, "---", StringComparison.Ordinal))
-                            {
-                                break;
-                            }
-                            else
-                            {
-                                frontMatterBuilder.AppendLine(line);
-                            }
-                        }
-
-                        var frontMatterDeserializer = new Deserializer();
-                        // todo: try/catch and better error message.
-                        frontMatter = frontMatterDeserializer.Deserialize<IDictionary<String, Object>>(frontMatterBuilder.ToString());
-                    }
-
-                    // Merge the mustache replace context.
-                    frontMatter = frontMatter ?? new Dictionary<String, Object>();
-                    if (mustacheContext != null)
-                    {
-                        foreach (KeyValuePair<String, Object> pair in mustacheContext)
-                        {
-                            frontMatter[pair.Key] = pair.Value;
-                        }
-                    }
-
-                    // Mustache-replace
-                    var mustacheParser = new MustacheTemplateParser();
-                    mustacheReplaced = mustacheParser.ReplaceValues(
-                        template: await reader.ReadToEndAsync(),
-                        replacementContext: frontMatter);
-                    Dump($"{Path.GetFileName(path)} after mustache replacement", mustacheReplaced);
-                }
-                finally
-                {
-                    reader?.Dispose();
-                    reader = null;
-                }
+                m_header = header;
+                m_value = value;
             }
 
-            // Deserialize
-            DeserializerBuilder deserializerBuilder = new DeserializerBuilder();
-            deserializerBuilder.WithTypeConverter(new TConverter());
-            Deserializer deserializer = deserializerBuilder.Build();
-            TResult result = deserializer.Deserialize<TResult>(mustacheReplaced);
-            Dump<TResult, TConverter>($"{Path.GetFileName(path)} after deserialization ", result);
-            return result;
-        }
-
-        private static void Dump(String header, String value)
-        {
-            Console.WriteLine();
-            Console.WriteLine(String.Empty.PadRight(80, '*'));
-            Console.WriteLine($"* {header}");
-            Console.WriteLine(String.Empty.PadRight(80, '*'));
-            Console.WriteLine();
-            using (StringReader reader = new StringReader(value))
+            public override String ToString()
             {
-                Int32 lineNumber = 1;
-                String line = reader.ReadLine();
-                while (line != null)
+                var result = new StringBuilder();
+                result.AppendLine();
+                result.AppendLine(String.Empty.PadRight(80, '*'));
+                result.AppendLine($"* {m_header}");
+                result.AppendLine(String.Empty.PadRight(80, '*'));
+                result.AppendLine();
+                using (StringReader reader = new StringReader(m_value))
                 {
-                    Console.WriteLine($"{lineNumber.ToString().PadLeft(4)}: {line}");
-                    line = reader.ReadLine();
-                    lineNumber++;
+                    Int32 lineNumber = 1;
+                    String line = reader.ReadLine();
+                    while (line != null)
+                    {
+                        result.AppendLine($"{lineNumber.ToString().PadLeft(4)}: {line}");
+                        line = reader.ReadLine();
+                        lineNumber++;
+                    }
                 }
+
+                return result.ToString();
             }
+
+            private readonly String m_header;
+            private readonly String m_value;
         }
 
-        private static void Dump<TObject, TConverter>(String header, TObject value)
-            where TConverter : YamlTypeConverter, new() 
+        private struct TraceObject<TObject, TConverter>
+            where TConverter : YamlTypeConverter, new()
         {
-            Console.WriteLine();
-            Console.WriteLine(String.Empty.PadRight(80, '*'));
-            Console.WriteLine($"* {header}");
-            Console.WriteLine(String.Empty.PadRight(80, '*'));
-            Console.WriteLine();
-            SerializerBuilder serializerBuilder = new SerializerBuilder();
-            serializerBuilder.WithTypeConverter(new TConverter());
-            Serializer serializer = serializerBuilder.Build();
-            Console.WriteLine(serializer.Serialize(value));
+            public TraceObject(String header, TObject value)
+            {
+                m_header = header;
+                m_value = value;
+            }
+
+            public override String ToString()
+            {
+                var result = new StringBuilder();
+                result.AppendLine();
+                result.AppendLine(String.Empty.PadRight(80, '*'));
+                result.AppendLine($"* {m_header}");
+                result.AppendLine(String.Empty.PadRight(80, '*'));
+                result.AppendLine();
+                SerializerBuilder serializerBuilder = new SerializerBuilder();
+                serializerBuilder.WithTypeConverter(new TConverter());
+                Serializer serializer = serializerBuilder.Build();
+                result.AppendLine(serializer.Serialize(m_value));
+                return result.ToString();
+            }
+
+            private readonly String m_header;
+            private readonly TObject m_value;
         }
+
+        private readonly IFileProvider m_fileProvider;
+        private readonly ParseOptions m_options;
+        private readonly ITraceWriter m_trace;
+    }
+
+    public interface ITraceWriter
+    {
+        void Info(String format, params Object[] args);
+
+        void Verbose(String format, params Object[] args);
+    }
+
+    public interface IFileProvider
+    {
+        FileData GetFile(String path);
+
+        String ResolvePath(String defaultRoot, String path);
+    }
+
+    public sealed class FileData
+    {
+        public String Name { get; set; }
+
+        public String Directory { get; set; }
+
+        public String Content { get; set; }
+    }
+
+    public sealed class ParseOptions
+    {
+        public ParseOptions()
+        {
+        }
+
+        internal ParseOptions(ParseOptions copy)
+        {
+            MaxFiles = copy.MaxFiles;
+            MustacheEvaluationMaxResultLength = copy.MustacheEvaluationMaxResultLength;
+            MustacheEvaluationTimeout = copy.MustacheEvaluationTimeout;
+            MustacheMaxDepth = copy.MustacheMaxDepth;
+        }
+
+        /// <summary>
+        /// Gets or sets the maximum number files that can be loaded when parsing a pipeline. Zero or less is treated as infinite.
+        /// </summary>
+        public Int32 MaxFiles { get; set; }
+
+        /// <summary>
+        /// Gets or sets the evaluation max result bytes for each mustache template. Zero or less is treated as unlimited.
+        /// </summary>
+        public Int32 MustacheEvaluationMaxResultLength { get; set; }
+
+        /// <summary>
+        /// Gets or sets the evaluation timeout for each mustache template. Zero or less is treated as infinite.
+        /// </summary>
+        public TimeSpan MustacheEvaluationTimeout { get; set; }
+
+        /// <summary>
+        /// Gets or sets the maximum depth for each mustache template. This number limits the maximum nest level. Any number less
+        /// than 1 is treated as Int32.MaxValue. An exception will be thrown when the threshold is exceeded.
+        /// </summary>
+        public Int32 MustacheMaxDepth { get; set; }
     }
 }
